@@ -151,9 +151,7 @@ fun compileSolution(problemId: String): Int {
 
 val submissionHistory = MutableList(0) { "" }
 
-fun runSubmission(problemId: String) = runBlocking {
-    val exeFile = Paths.get(processPath, "judge", "moj_main.exe").absolutePathString()
-
+fun formatProbIOFiles(problemId: String) {
     Paths.get(processPath, "problems", problemId, "tests").toFile().listFiles { file ->
         file.isFile && file.name == file.nameWithoutExtension
     }!!.forEach {
@@ -165,6 +163,303 @@ fun runSubmission(problemId: String) = runBlocking {
     }!!.forEach {
         it.renameTo(File(it.absolutePath.replace(".a", ".out")))
     }
+}
+
+suspend fun runSingleFile(prob: ProbInfo, file: File): JudgeResult {
+    val additionalTime = 1000L
+
+    val problemId = prob.id
+
+    val exeFile = Paths.get(processPath, "judge", "moj_main.exe").absolutePathString()
+
+    val judgeErr = Paths.get(processPath, "judge", "err").toFile().also {
+        if (!it.exists()) it.createNewFile()
+    }
+
+    val judgeOut = Paths.get(processPath, "judge", "out").toFile().also {
+        if (!it.exists()) it.createNewFile()
+    }
+
+    val solutionCpp = Paths.get(processPath, "problems", problemId, "files", "solution.cpp").toFile()
+    val solutionExe = Paths.get(processPath, "problems", problemId, "files", "solution.exe").toFile()
+    val solutionExeExists = solutionExe.exists()
+
+
+    val checkerOut = Paths.get(processPath, "judge", "chkOut").toFile().also {
+        if (!it.exists()) it.createNewFile()
+        else it.writeText("")
+    }
+
+    val checkerErr = Paths.get(processPath, "judge", "chkErr").toFile().also {
+        if (!it.exists()) it.createNewFile()
+        else it.writeText("")
+    }
+
+    val checkerPath = Paths.get(processPath, "problems", problemId, "files", "check.exe").absolutePathString()
+
+    val logFile = Paths.get(processPath, "judge", "log.txt").toFile()
+    logFile.appendText("\n\nJudging problem $problemId.\n\n")
+
+    judgeErr.writeText("")
+    judgeOut.writeText("")
+
+    val ansPath = Paths.get(processPath, "problems", problemId, "tests", file.nameWithoutExtension + ".out")
+    val ansFile = ansPath.toFile()
+
+
+    if (!ansFile.exists()) {
+        if (!solutionCpp.exists() && !solutionExeExists) {
+            redPrintln("정답 파일과 정해 코드가 둘 다 없어 채점을 진행할 수 없습니다!")
+            logFile.appendText("정답 파일과 정해 코드가 둘 다 없음\n")
+            return JudgeResult(prob, JudgeResult.Result.FAILED, 0, null, null, LocalDateTime.now())
+        }
+        if (!solutionExeExists) {
+            logFile.appendText("Compiling main correct solution..\n")
+
+            val dur = measureTime {
+                if (compileSolution(problemId) != 0) {
+                    redPrintln("정해 컴파일이 실패했습니다.")
+                    logFile.appendText("Failed to compile mcs\n")
+                    return JudgeResult(prob, JudgeResult.Result.FAILED, 0, null, null, LocalDateTime.now())
+                }
+            }
+
+            logFile.appendText("Main correct solution compiled in ${dur.inWholeMilliseconds} ms\n")
+        }
+
+        val outP = ProcessBuilder(listOf(solutionExe.absolutePath))
+            .redirectInput(file)
+            .redirectOutput(ansFile)
+            .start()
+
+        val dur = measureTime {
+            outP.waitFor()
+        }
+        logFile.appendText("Output file ${ansFile.name} generated in ${dur.inWholeMilliseconds} ms\n")
+    }
+
+    val process = ProcessBuilder(exeFile)
+        .redirectError(judgeErr)
+        .redirectInput(file)
+        .redirectOutput(judgeOut).start()
+
+    val (exitCode, time, result, mem) = runWithLimits(
+        process, prob.timeLimit, prob.memoryLimit + additionalTime
+    )
+
+    if (result == 3) {
+        logFile.appendText("MLE at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
+        return JudgeResult(prob,
+            JudgeResult.Result.MEMORY_LIMIT_EXCEEDED,
+            null,
+            time,
+            if(mem == -1L) null else mem,
+            LocalDateTime.now())
+    }
+
+    if ((exitCode != null && exitCode != 0) || result == 4) {
+        logFile.appendText("RE at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
+        return JudgeResult(prob,
+            JudgeResult.Result.RUNTIME_ERROR,
+            null,
+            time,
+            if(mem == -1L) null else mem,
+            LocalDateTime.now()
+        )
+    }
+
+    if (exitCode == null || time > prob.timeLimit) {
+        logFile.appendText("TLE at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
+        return JudgeResult(prob,
+            JudgeResult.Result.TIME_LIMIT_EXCEEDED,
+            null,
+            time,
+            if(mem == -1L) null else mem,
+            LocalDateTime.now()
+        )
+    }
+
+    checkerOut.writeText("")
+    checkerErr.writeText("")
+
+    val chkCode = ProcessBuilder(
+        listOf(
+            checkerPath,
+            file.absolutePath,
+            judgeOut.absolutePath,
+            ansPath.absolutePathString(),
+        )
+    ).redirectError(checkerErr).redirectOutput(checkerOut).start().waitFor()
+
+    if (chkCode != 0) {
+        logFile.appendText("WA at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
+        return JudgeResult(prob,
+            JudgeResult.Result.WRONG_ANSWER,
+            null,
+            time,
+            if(mem == -1L) null else mem,
+            LocalDateTime.now()
+        )
+    }
+
+    logFile.appendText("AC at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
+
+    return JudgeResult(prob,
+        JudgeResult.Result.ACCEPTED,
+        exitCode,
+        time,
+        if(mem == -1L) null else mem,
+        LocalDateTime.now()
+    )
+}
+
+fun runSubtasks(problemId: String) = runBlocking {
+    formatProbIOFiles(problemId)
+
+    val prob = ProbInfo(
+        id = problemId,
+        title = probJson.get("title").asString,
+        timeLimit = probJson.get("timeLimit").asLong,
+        memoryLimit = probJson.get("memoryLimitMb").asLong * 1024L,
+    )
+
+    val files = Paths.get(processPath, "problems", problemId, "tests").toFile().listFiles { file ->
+        file.isFile && file.name.endsWith(".in")
+    }!!
+
+    val title = probJson.get("title").asString
+    val timeLimit = probJson.get("timeLimit").asLong
+    val memoryLimitKb = probJson.get("memoryLimitMb").asLong * 1024L
+    val additionalTime = 1000L
+
+    var testCount = 0
+    var subtaskCnt = 0
+
+    val subtasks = probJson.get("subtasks").asJsonArray
+    subtasks.forEachIndexed { i, subtask ->
+        val number = subtask.asJsonObject.get("number").asInt
+        testCount += files.filter { f -> f.name.startsWith("subtask$number-") }.size
+        subtaskCnt++
+    }
+
+    if(testCount == 0) {
+        clearPrevLine()
+        redPrintln("$problemId 문제의 테스트 케이스가 없습니다.")
+        return@runBlocking
+    }
+
+    var prevPercentage = 0
+    clearPrevLine()
+    orangePrintln("채점 중 (0%)")
+
+    val subtaskResult = MutableList(subtaskCnt) { JudgeResult(prob, JudgeResult.Result.FAILED, null, null, null, LocalDateTime.now()) }
+
+    var ranTests = 0
+
+    val finishedSubtasks = mutableSetOf<Int>()
+    val subtaskNumberToIdx = mutableMapOf<Int, Int>()
+    subtasks.forEachIndexed { i, subtask ->
+        val number = subtask.asJsonObject.get("number").asInt
+        subtaskNumberToIdx.put(number, i)
+    }
+
+    subtasks.forEachIndexed { i, subtask ->
+        if(subtasks[i].asJsonObject.has("dependencies")) {
+            subtasks[i].asJsonObject.get("dependencies").asJsonArray.forEach { dependency ->
+                if(!finishedSubtasks.contains(dependency.asInt)) {
+                    clearPrevLine()
+                    redPrintln("$problemId 문제의 서브태스크 위계가 잘못되었습니다.")
+                    return@runBlocking
+                }
+                if(subtaskResult[subtaskNumberToIdx[dependency.asInt]!!].result != JudgeResult.Result.ACCEPTED) {
+                    subtaskResult[i] = subtaskResult[subtaskNumberToIdx[dependency.asInt]!!]
+                    return@forEachIndexed
+                }
+            }
+        }
+
+        val number = subtask.asJsonObject.get("number").asInt
+        var judgeEnded = false
+
+        files.filter { f -> f.name.startsWith("subtask$number-") }.forEach { file ->
+            if(judgeEnded) return@forEach
+            ranTests++
+            val result = runSingleFile(prob, file)
+            if(subtaskResult[i].timeMs == null ||
+                (result.timeMs != null && subtaskResult[i].timeMs!! < result.timeMs!!)) {
+                subtaskResult[i].timeMs = result.timeMs
+            }
+            if(subtaskResult[i].memoryKb == null ||
+                (result.memoryKb != null && subtaskResult[i].memoryKb!! < result.memoryKb!!)) {
+                subtaskResult[i].memoryKb = result.memoryKb
+            }
+            if(result.result != JudgeResult.Result.ACCEPTED) {
+                subtaskResult[i].result = result.result
+                judgeEnded = true
+            }
+            val p = ranTests * 100 / testCount
+            if(p != prevPercentage) {
+                prevPercentage = p
+                clearPrevLine()
+                orangePrintln("채점 중 (${ranTests * 100 / testCount}%)")
+            }
+        }
+        if(!judgeEnded) subtaskResult[i].result = JudgeResult.Result.ACCEPTED
+
+        subtaskResult[i].judgeTime = LocalDateTime.now()
+        finishedSubtasks.add(number)
+    }
+
+    val result = SubtaskProbJudgeResult(prob,
+        0,
+        JudgeResult(prob, JudgeResult.Result.ACCEPTED, ranTests * 100 / testCount, null, null, LocalDateTime.now()),
+        subtaskResult.run {
+            val ret = MutableList(0) { 0 to JudgeResult(prob) }
+            subtasks.forEachIndexed { i, subtask ->
+                ret.addLast(subtask.asJsonObject.get("number").asInt to this[i])
+            }
+            ret.toList()
+        })
+
+    var fullPoint = 0
+
+    subtaskResult.forEachIndexed { i, it ->
+        if(result.allResult.result == JudgeResult.Result.ACCEPTED) result.allResult.result = it.result
+        val p = subtasks[i].asJsonObject.get("point").asInt
+        if(it.result == JudgeResult.Result.ACCEPTED) {
+            result.point += p
+        }
+        fullPoint += p
+
+        if(result.allResult.timeMs == null ||
+            (it.timeMs != null && result.allResult.timeMs!! < it.timeMs!!)) {
+            result.allResult.timeMs = it.timeMs
+        }
+        if(result.allResult.memoryKb == null ||
+            (it.memoryKb != null && result.allResult.memoryKb!! < it.memoryKb!!)) {
+            result.allResult.memoryKb = it.memoryKb
+        }
+    }
+
+    clearPrevLine()
+    var pointStr = ""
+    pointStr += when (result.point) {
+        fullPoint -> Ansi.GREEN + Ansi.BOLD + result.point.toString() + "점" + Ansi.RESET
+        0 -> Ansi.RED + "틀렸습니다" + Ansi.RESET
+        else -> Ansi.YELLOW + Ansi.BOLD + result.point.toString() + "점" + Ansi.RESET
+    }
+
+    println("$pointStr | " + result.allResult.defaultPrintWithoutResult())
+    result.subtaskResult.forEach { (i, res) ->
+        val p = subtasks[subtaskNumberToIdx[i]!!].asJsonObject.get("point").asInt
+        println("  $i: ${p}점 | ${res.defaultPrint(false)}")
+    }
+}
+
+fun runSubmission(problemId: String) = runBlocking {
+    val exeFile = Paths.get(processPath, "judge", "moj_main.exe").absolutePathString()
+
+    formatProbIOFiles(problemId)
 
     val files = Paths.get(processPath, "problems", problemId, "tests").toFile().listFiles { file ->
         file.isFile && file.name.endsWith(".in")
@@ -367,7 +662,13 @@ fun judge(problemId: String) {
         return
     }
 
-    runSubmission(problemId)
+    val probType = probJson.get("probType")?.asString ?: "normal"
+
+    when (probType) {
+        "normal" -> runSubmission(problemId)
+        "subtask", "subtasks" -> runSubtasks(problemId)
+        else -> runSubmission(problemId)
+    }
     println()
 }
 

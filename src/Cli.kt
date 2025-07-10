@@ -76,13 +76,13 @@ fun cliSelect(t: Int) {
         }
 
         if (!Paths.get(processPath, "problems", id).toFile().exists() || id.isEmpty()) {
-            cliMsg.append(Ansi.RED).append("입력한 문제를 찾지 못했습니다.").append(Ansi.RESET)
+            cliMsg.append(wrapInABox("${Emoji.WARNING} 입력한 문제를 찾지 못했습니다.", Ansi.YELLOW))
         } else {
             clearDisplay()
             judge(id)
             ignorePrevInput()
-            println("아무 키를 눌러 메뉴로 돌아가세요.")
-            getC()
+            println("Enter 키를 눌러 메뉴로 돌아가세요.")
+            readln()
         }
     }
 
@@ -109,14 +109,22 @@ fun cliSelect(t: Int) {
 
 var cliMsg = StringBuilder()
 
+fun strWidth(str: String): Int {
+    var s = str
+    for(c in Ansi.ALL) s = s.replace(c, "")
+    for(e in Emoji.WIDTH_1) s = s.replace(e, "a")
+    for(e in Emoji.WIDTH_2) s = s.replace(e, "가")
+    var w = 0
+    for(c in s) w += maxOf(WCWidth.wcwidth(c.code), 0)
+    return w
+}
+
 fun wrapInABox(str: String, colorStr: String = ""): String {
     val list = str.replace("\r\n", "\n").split("\n")
     val wList = MutableList(list.size) {0}
     var maxW = 0
     for(i in 0..<list.size) {
-        var s = list[i]
-        for(c in Ansi.ALL) s = s.replace(c, "")
-        for(c in s) wList[i] += maxOf(WCWidth.wcwidth(c.code), 0)
+        wList[i] = strWidth(list[i])
         maxW = maxOf(maxW, wList[i])
     }
     val result = StringBuilder()

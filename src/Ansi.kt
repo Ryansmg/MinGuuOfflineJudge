@@ -34,6 +34,17 @@ object Ansi {
     )
 }
 
+object Emoji {
+    const val WARNING = "⚠\uFE0F"
+    const val CROSS_MARK = "❌"
+
+    val WIDTH_1: List<String> = listOf()
+
+    val WIDTH_2 = listOf(
+        WARNING, CROSS_MARK
+    )
+}
+
 
 fun clearDisplay() { print(Ansi.CLEAR_DISPLAY + Ansi.CURSOR_UL) }
 fun redPrintln(msg: String) { println(Ansi.RED + msg + Ansi.RESET) }
