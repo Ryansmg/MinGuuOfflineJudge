@@ -9,7 +9,6 @@ import kotlinx.coroutines.*
 import java.io.File
 import java.nio.charset.Charset
 import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
 import kotlin.time.measureTime
 
 var probJson: JsonObject = JsonObject()
@@ -149,7 +148,7 @@ fun compileSolution(problemId: String): Int {
     ).start().waitFor()
 }
 
-val submissionHistory = MutableList(0) { "" }
+val submissionHistory = MutableList(0) { ProbJudgeResult() }
 
 fun formatProbIOFiles(problemId: String) {
     Paths.get(processPath, "problems", problemId, "tests").toFile().listFiles { file ->
@@ -163,10 +162,16 @@ fun formatProbIOFiles(problemId: String) {
     }!!.forEach {
         it.renameTo(File(it.absolutePath.replace(".a", ".out")))
     }
+
+    Paths.get(processPath, "problems", problemId, "tests").toFile().listFiles { file ->
+        file.isFile && file.name.endsWith(".ans")
+    }!!.forEach {
+        it.renameTo(File(it.absolutePath.replace(".ans", ".out")))
+    }
 }
 
 suspend fun runSingleFile(prob: ProbInfo, file: File): JudgeResult {
-    val additionalTime = 1000L
+    val additionalTime = 1000L + UserSettings.timeBonusAdd
 
     val problemId = prob.id
 
@@ -198,8 +203,6 @@ suspend fun runSingleFile(prob: ProbInfo, file: File): JudgeResult {
     val checkerPath = Paths.get(processPath, "problems", problemId, "files", "check.exe").absolutePathString()
 
     val logFile = Paths.get(processPath, "judge", "log.txt").toFile()
-    logFile.appendText("\n\nJudging problem $problemId.\n\n")
-
     judgeErr.writeText("")
     judgeOut.writeText("")
 
@@ -244,7 +247,7 @@ suspend fun runSingleFile(prob: ProbInfo, file: File): JudgeResult {
         .redirectOutput(judgeOut).start()
 
     val (exitCode, time, result, mem) = runWithLimits(
-        process, prob.timeLimit, prob.memoryLimit + additionalTime
+        process, prob.timeLimit * UserSettings.timeBonusMultiply + additionalTime, prob.memoryLimit
     )
 
     if (result == 3) {
@@ -268,7 +271,7 @@ suspend fun runSingleFile(prob: ProbInfo, file: File): JudgeResult {
         )
     }
 
-    if (exitCode == null || time > prob.timeLimit) {
+    if (exitCode == null || time >= prob.timeLimit) {
         logFile.appendText("TLE at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
         return JudgeResult(prob,
             JudgeResult.Result.TIME_LIMIT_EXCEEDED,
@@ -313,7 +316,7 @@ suspend fun runSingleFile(prob: ProbInfo, file: File): JudgeResult {
     )
 }
 
-fun runSubtasks(problemId: String) = runBlocking {
+fun runSubtasks(problemId: String, showPercentage: Boolean = true) = runBlocking {
     formatProbIOFiles(problemId)
 
     val prob = ProbInfo(
@@ -321,16 +324,13 @@ fun runSubtasks(problemId: String) = runBlocking {
         title = probJson.get("title").asString,
         timeLimit = probJson.get("timeLimit").asLong,
         memoryLimit = probJson.get("memoryLimitMb").asLong * 1024L,
+        probType = ProbInfo.Type.valueOf(probJson.get("probType")?.asString?.uppercase() ?: "NORMAL"),
+        json = probJson
     )
 
     val files = Paths.get(processPath, "problems", problemId, "tests").toFile().listFiles { file ->
         file.isFile && file.name.endsWith(".in")
     }!!
-
-    val title = probJson.get("title").asString
-    val timeLimit = probJson.get("timeLimit").asLong
-    val memoryLimitKb = probJson.get("memoryLimitMb").asLong * 1024L
-    val additionalTime = 1000L
 
     var testCount = 0
     var subtaskCnt = 0
@@ -348,9 +348,13 @@ fun runSubtasks(problemId: String) = runBlocking {
         return@runBlocking
     }
 
+    val logFile = Paths.get(processPath, "judge", "log.txt").toFile()
+    logFile.appendText("\n\nJudging problem $problemId.\n\n")
+
     var prevPercentage = 0
     clearPrevLine()
-    orangePrintln("채점 중 (0%)")
+    if(showPercentage) orangePrintln("채점 중 (0%)")
+    else orangePrintln("채점 중")
 
     val subtaskResult = MutableList(subtaskCnt) { JudgeResult(prob, JudgeResult.Result.FAILED, null, null, null, LocalDateTime.now()) }
 
@@ -358,14 +362,31 @@ fun runSubtasks(problemId: String) = runBlocking {
 
     val finishedSubtasks = mutableSetOf<Int>()
     val subtaskNumberToIdx = mutableMapOf<Int, Int>()
+    val subtaskInfos = mutableListOf<SubtaskInfo>()
+
     subtasks.forEachIndexed { i, subtask ->
         val number = subtask.asJsonObject.get("number").asInt
         subtaskNumberToIdx.put(number, i)
+
+        var depList: MutableList<Int>? = null
+        if(subtask.asJsonObject.has("dependency")) {
+            depList = mutableListOf()
+            subtask.asJsonObject.get("dependency").asJsonArray.forEach { dependency ->
+                depList.add(dependency.asInt)
+            }
+        }
+
+        subtaskInfos.addLast(SubtaskInfo(
+            number,
+            subtask.asJsonObject.get("point").asInt,
+            subtask.asJsonObject.get("description").asString,
+            depList
+        ))
     }
 
     subtasks.forEachIndexed { i, subtask ->
-        if(subtasks[i].asJsonObject.has("dependencies")) {
-            subtasks[i].asJsonObject.get("dependencies").asJsonArray.forEach { dependency ->
+        if(subtasks[i].asJsonObject.has("dependency")) {
+            subtasks[i].asJsonObject.get("dependency").asJsonArray.forEach { dependency ->
                 if(!finishedSubtasks.contains(dependency.asInt)) {
                     clearPrevLine()
                     redPrintln("$problemId 문제의 서브태스크 위계가 잘못되었습니다.")
@@ -378,7 +399,7 @@ fun runSubtasks(problemId: String) = runBlocking {
             }
         }
 
-        val number = subtask.asJsonObject.get("number").asInt
+        val number: Int = subtask.asJsonObject.get("number").asInt
         var judgeEnded = false
 
         files.filter { f -> f.name.startsWith("subtask$number-") }.forEach { file ->
@@ -398,7 +419,7 @@ fun runSubtasks(problemId: String) = runBlocking {
                 judgeEnded = true
             }
             val p = ranTests * 100 / testCount
-            if(p != prevPercentage) {
+            if(p != prevPercentage && showPercentage) {
                 prevPercentage = p
                 clearPrevLine()
                 orangePrintln("채점 중 (${ranTests * 100 / testCount}%)")
@@ -411,6 +432,7 @@ fun runSubtasks(problemId: String) = runBlocking {
     }
 
     val result = SubtaskProbJudgeResult(prob,
+        subtaskInfos,
         0,
         JudgeResult(prob, JudgeResult.Result.ACCEPTED, ranTests * 100 / testCount, null, null, LocalDateTime.now()),
         subtaskResult.run {
@@ -450,25 +472,27 @@ fun runSubtasks(problemId: String) = runBlocking {
     }
 
     println("$pointStr | " + result.allResult.defaultPrintWithoutResult())
+    val list = MutableList(0) { List(0) { "" } }
     result.subtaskResult.forEach { (i, res) ->
         val p = subtasks[subtaskNumberToIdx[i]!!].asJsonObject.get("point").asInt
-        println("  $i: ${p}점 | ${res.defaultPrint(false)}")
+        list.addLast("  $i: ${p}점 | ${res.defaultPrint(false, showTime = false)}".split(" | "))
     }
+    println(tableToStr(formatTable(list)))
+    submissionHistory.addLast(
+        ProbJudgeResult(
+            prob, null, result
+        )
+    )
 }
 
-fun runSubmission(problemId: String) = runBlocking {
-    val exeFile = Paths.get(processPath, "judge", "moj_main.exe").absolutePathString()
-
+fun runSingle(problemId: String, showPercentage: Boolean = true) = runBlocking {
     formatProbIOFiles(problemId)
 
     val files = Paths.get(processPath, "problems", problemId, "tests").toFile().listFiles { file ->
         file.isFile && file.name.endsWith(".in")
     }
 
-    val title = probJson.get("title").asString
-    val timeLimit = probJson.get("timeLimit").asLong
-    val memoryLimitKb = probJson.get("memoryLimitMb").asLong * 1024L
-    val additionalTime = 1000L
+    val prob = ProbInfo(probJson)
 
     val testCount = files?.size ?: 0
     if(testCount == 0) {
@@ -478,175 +502,88 @@ fun runSubmission(problemId: String) = runBlocking {
     }
 
     clearPrevLine()
-    orangePrintln("채점 중 (0%)")
-//    orangePrintln("채점 중 (0%) | -- ms | -- KB")
+    if(showPercentage) orangePrintln("채점 중 (0%)")
+    else orangePrintln("채점 중")
 
     var mxt = 0L
     var mxm = -1L
     var prevPercent = 0
 
-    val judgeErr = Paths.get(processPath, "judge", "err").toFile().also {
-        if(!it.exists()) it.createNewFile()
-    }
-
-    val judgeOut = Paths.get(processPath, "judge", "out").toFile().also {
-        if (!it.exists()) it.createNewFile()
-    }
-
-    val solutionCpp = Paths.get(processPath, "problems", problemId, "files", "solution.cpp").toFile()
-    val solutionExe = Paths.get(processPath, "problems", problemId, "files", "solution.exe").toFile()
-    var solutionExeExists = solutionExe.exists()
-
-
-    val checkerOut = Paths.get(processPath, "judge", "chkOut").toFile().also {
-        if(!it.exists()) it.createNewFile()
-        else it.writeText("")
-    }
-
-    val checkerErr = Paths.get(processPath, "judge", "chkErr").toFile().also {
-        if(!it.exists()) it.createNewFile()
-        else it.writeText("")
-    }
-
-    val checkerPath = Paths.get(processPath, "problems", problemId, "files", "check.exe").absolutePathString()
-
     val logFile = Paths.get(processPath, "judge", "log.txt").toFile()
     logFile.appendText("\n\nJudging problem $problemId.\n\n")
 
-    val formatter = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")
-
     files!!.forEachIndexed { i, file ->
-        judgeErr.writeText("")
-        judgeOut.writeText("")
+        val res = runSingleFile(prob, file)
 
-        val ansPath = Paths.get(processPath, "problems", problemId, "tests", file.nameWithoutExtension + ".out")
-        val ansFile = ansPath.toFile()
+        mxt = maxOf(mxt, res.timeMs ?: -1)
+        mxm = maxOf(mxm, res.memoryKb ?: -1)
 
-        val percent = (i + 1) * 100 / testCount
+        val percent = ((i + 1) * 100) / testCount
 
-        if(!ansFile.exists()) {
-            if(!solutionCpp.exists() && !solutionExeExists) {
-                redPrintln("정답 파일과 정해 코드가 둘 다 없어 채점을 진행할 수 없습니다!")
-                logFile.appendText("정답 파일과 정해 코드가 둘 다 없음\n")
-                return@runBlocking
-            }
-            if(!solutionExeExists) {
-//                yellowPrintln("- 정해 코드를 컴파일하는 중입니다..")
-                logFile.appendText("Compiling main correct solution..\n")
-
-                val dur = measureTime {
-                    if (compileSolution(problemId) != 0) {
-                        redPrintln("정해 컴파일이 실패했습니다.")
-                        logFile.appendText("Failed to compile mcs\n")
-                        return@runBlocking
-                    }
-                }
-
-                logFile.appendText("Main correct solution compiled in ${dur.inWholeMilliseconds} ms\n")
-//                clearPrevLine()
-                solutionExeExists = true
-            }
-
-            val outP = ProcessBuilder(listOf(solutionExe.absolutePath))
-                .redirectInput(file)
-                .redirectOutput(ansFile)
-                .start()
-
-            val dur = measureTime {
-                outP.waitFor()
-            }
-            logFile.appendText("Output file ${ansFile.name} generated in ${dur.inWholeMilliseconds} ms\n")
-        }
-
-        val process = ProcessBuilder(exeFile)
-            .redirectError(judgeErr)
-            .redirectInput(file)
-            .redirectOutput(judgeOut).start()
-
-        val (exitCode, time, result, mem) = runWithLimits(
-            process, timeLimit, memoryLimitKb + additionalTime
-        )
-
-        mxt = maxOf(mxt, time)
-        mxm = maxOf(mxm, mem)
-
-        if(result == 3) {
+        if(res.result != JudgeResult.Result.ACCEPTED) {
             clearPrevLine()
-            val msg = Ansi.ORANGE + "메모리 초과 ($percent%)${Ansi.RESET} | $mxt ms | ${if (mxm == -1L) "--" else mxm.toString()} KB"
-            println(msg)
-            submissionHistory.addLast("$title | $msg | ${LocalDateTime.now().format(formatter)}")
-            logFile.appendText("MLE at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
+            res.percent = percent
+            println(res.defaultPrint(showPercentage = showPercentage))
+            submissionHistory.addLast(ProbJudgeResult(prob, JudgeResult(
+                prob,
+                res.result,
+                percent,
+                mxt,
+                if(mxm == -1L) null else mxm,
+                LocalDateTime.now()
+            )))
             return@runBlocking
         }
 
-        if((exitCode != null && exitCode != 0) || result == 4) {
+        if(prevPercent != percent && showPercentage) {
             clearPrevLine()
-            val msg = Ansi.PURPLE + "런타임 에러 ($percent%)${Ansi.RESET} | $mxt ms | ${if (mxm == -1L) "--" else mxm.toString()} KB"
-            println(msg)
-            submissionHistory.addLast("$title | $msg | ${LocalDateTime.now().format(formatter)}")
-//            println()
-//            redPrint(judgeErr.readText())
-            logFile.appendText("RE at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
-            return@runBlocking
-        }
-
-        if(exitCode == null || time > timeLimit) {
-            clearPrevLine()
-            val msg = Ansi.ORANGE + "시간 초과 ($percent%)${Ansi.RESET} | $mxt ms | ${if (mxm == -1L) "--" else mxm.toString()} KB"
-            println(msg)
-            submissionHistory.addLast("$title | $msg | ${LocalDateTime.now().format(formatter)}")
-            logFile.appendText("TLE at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
-            return@runBlocking
-        }
-
-        checkerOut.writeText("")
-        checkerErr.writeText("")
-
-        val chkCode = ProcessBuilder(
-            listOf(
-                checkerPath,
-                file.absolutePath,
-                judgeOut.absolutePath,
-                ansPath.absolutePathString(),
-            )
-        ).redirectError(checkerErr).redirectOutput(checkerOut).start().waitFor()
-
-        if(chkCode != 0) {
-            clearPrevLine()
-            val msg = Ansi.RED + "틀렸습니다 ($percent%) ${Ansi.RESET}| $mxt ms | ${if (mxm == -1L) "--" else mxm.toString()} KB"
-            println(msg)
-
-            submissionHistory.addLast("$title | $msg | ${LocalDateTime.now().format(formatter)}")
-            logFile.appendText("WA at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
-            return@runBlocking
-        }
-
-        if(prevPercent != percent) {
-            clearPrevLine()
-//        orangePrintln("채점 중 ($percent%) | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB")
             orangePrintln("채점 중 ($percent%)")
             prevPercent = percent
         }
-
-        logFile.appendText("AC at ${file.name} | $time ms | ${if (mem == -1L) "--" else mem.toString()} KB\n")
     }
 
     clearPrevLine()
-    val msg = Ansi.GREEN + Ansi.BOLD + "맞았습니다!!${Ansi.RESET} | $mxt ms | ${if (mxm == -1L) "--" else mxm.toString()} KB"
-    println(msg)
-    submissionHistory.addLast("$title | $msg | ${LocalDateTime.now().format(formatter)}")
+    val result = JudgeResult(
+        prob, JudgeResult.Result.ACCEPTED, 100, mxt, if(mxm == -1L) null else mxm, LocalDateTime.now()
+    )
+    println(result.defaultPrint(showPercentage = showPercentage))
+    submissionHistory.addLast(ProbJudgeResult(prob, result))
     logFile.appendText("Accepted $problemId\n")
 }
 
-fun judge(problemId: String) {
+fun judge(problemId: String, showPercentage: Boolean = true) {
     probJson = JsonParser.parseString(
         Paths.get(processPath, "problems", problemId, "info.json").toFile().readText(Charset.forName("utf-8"))
     ).asJsonObject
 
+    val probType = probJson.get("probType")?.asString ?: "normal"
+
     println()
-    println("${probJson.get("title").asString}")
-    println("시간 제한: ${probJson.get("timeLimit").asLong/1000.0} 초 | 메모리 제한: ${probJson.get("memoryLimitMb").asLong} MB")
-    println()
+    if(probType == "normal") {
+        println("${probJson.get("title").asString}")
+        println("시간 제한: ${probJson.get("timeLimit").asLong/1000.0} 초 | 메모리 제한: ${probJson.get("memoryLimitMb").asLong} MB")
+        println()
+    }
+    if(probType == "subtask") {
+        println("${probJson.get("title").asString} ${Ansi.GRAY}[서브태스크]${Ansi.RESET}")
+        println("시간 제한: ${probJson.get("timeLimit").asLong/1000.0} 초 | 메모리 제한: ${probJson.get("memoryLimitMb").asLong} MB")
+        println()
+
+        val table = MutableList(0) { MutableList(0) { "" } }
+        for(subtask in probJson.get("subtasks").asJsonArray.map { it.asJsonObject }) {
+            table.addLast(mutableListOf(
+                "  ${subtask.get("number").asInt}",
+                subtask.get("point").asInt.toString() + "점",
+                subtask.get("description").asString
+            ))
+        }
+        println(wrapInABox(
+            "${Ansi.CYAN}서브태스크${Ansi.RESET}\n" +
+            tableToStr(formatTable(table)),
+            Ansi.CYAN)
+        )
+        println()
+    }
 
     yellowPrintln("채점 준비 중")
 
@@ -662,17 +599,15 @@ fun judge(problemId: String) {
         return
     }
 
-    val probType = probJson.get("probType")?.asString ?: "normal"
-
     when (probType) {
-        "normal" -> runSubmission(problemId)
-        "subtask", "subtasks" -> runSubtasks(problemId)
-        else -> runSubmission(problemId)
+        "normal" -> runSingle(problemId, showPercentage)
+        "subtask" -> runSubtasks(problemId, showPercentage)
+        else -> redPrintln("잘못된 문제 타입입니다.")
     }
     println()
 }
 
-fun main() {
+fun main() = runBlocking {
     processPath = System.getProperty("user.dir")
     cli()
 }

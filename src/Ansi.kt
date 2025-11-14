@@ -8,6 +8,7 @@ object Ansi {
     const val BLUE = "\u001B[34m"
     const val CYAN = "\u001B[36m"
     const val PURPLE = "\u001B[35m"
+    const val GRAY = "\u001B[90m"
 
     const val CLEAR_LINE = "\u001B[2K"
     const val CLEAR_DISPLAY = "\u001B[2J"
@@ -28,7 +29,7 @@ object Ansi {
     const val INVISIBLE_OFF = "\u001B[28m"
 
     val ALL = listOf(
-        RESET, RED, ORANGE, GREEN, YELLOW, BLUE, CYAN, PURPLE,
+        RESET, RED, ORANGE, GREEN, YELLOW, BLUE, CYAN, PURPLE, GRAY,
         CLEAR_LINE, CLEAR_DISPLAY, CURSOR_UL, CURSOR_UP, CURSOR_DOWN, CURSOR_START,
         BOLD, UNDERLINE, BLINK, REVERSED, INVISIBLE, STRIKETHROUGH, UNDERLINE_OFF, BLINK_OFF, REVERSED_OFF, INVISIBLE_OFF
     )

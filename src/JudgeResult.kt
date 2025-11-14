@@ -1,4 +1,5 @@
 import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 class JudgeResult(
     var prob: ProbInfo,
@@ -39,12 +40,21 @@ class JudgeResult(
         }
     }
 
-    fun defaultPrint(showPercentage: Boolean = true): String {
-        if(result == Result.ACCEPTED || !showPercentage) return "$result | ${timeMs?.toString() ?: "--"} ms | ${memoryKb?.toString() ?: "--"} KB"
-        return "$result (${percent?.toString() ?: "0"}%) | ${timeMs?.toString() ?: "--"} ms | ${memoryKb?.toString() ?: "--"} KB"
+    fun defaultPrint(showPercentage: Boolean = true, showTime: Boolean = true): String {
+        val timeStr = if (showTime) " | ${judgeTime.format(formatter)}" else ""
+        if(result == Result.ACCEPTED || !showPercentage) return "$result | ${timeMs?.toString() ?: "--"} ms | ${memoryKb?.toString() ?: "--"} KB$timeStr"
+        return "$result (${percent?.toString() ?: "0"}%) | ${timeMs?.toString() ?: "--"} ms | ${memoryKb?.toString() ?: "--"} KB$timeStr"
     }
 
-    fun defaultPrintWithoutResult(): String {
-        return "${timeMs?.toString() ?: "--"} ms | ${memoryKb?.toString() ?: "--"} KB"
+    fun defaultPrintWithoutResult(showTime: Boolean = true): String {
+        val timeStr = if (showTime) " | ${judgeTime.format(formatter)}" else ""
+        return "${timeMs?.toString() ?: "--"} ms | ${memoryKb?.toString() ?: "--"} KB$timeStr"
     }
+
+    fun toList(showPercentage: Boolean = true): List<String> = listOf(
+        if(result == Result.ACCEPTED || !showPercentage) result.toString() else "$result (${percent?.toString() ?: "0"}%)",
+        "${timeMs?.toString() ?: "--"} ms",
+        "${memoryKb?.toString() ?: "--"} KB",
+        "${judgeTime.format(formatter)}"
+    )
 }
